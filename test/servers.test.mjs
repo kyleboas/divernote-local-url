@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { readPiSessions, releaseClosedIssueServers, serverMentionPatterns } from '../servers.mjs';
+import { conversationText, readKeptPorts, readPiSessions, releaseClosedIssueServers, serverMentionPatterns } from '../servers.mjs';
 import previewServers from '../index.mjs';
 
 const ROOT = '/pi-worktrees';
@@ -25,6 +25,7 @@ function harness({ servers, serves = [], sessions = {} }) {
   const stopped = [];
   const unserved = [];
   const options = {
+    keptPorts: async () => new Set(),
     listServers: async () => servers,
     listServes: async () => serves,
     readIssueSession: async worktree => sessions[worktree] ?? '',
@@ -107,7 +108,11 @@ test('Pi conversations are read from the directory Divernote names', async t => 
   const directory = await mkdtemp(join(tmpdir(), 'preview-servers-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await mkdir(join(directory, 'sessions'));
-  await writeFile(join(directory, 'sessions', 'a.jsonl'), 'http://localhost:8765');
+  const line = (role, content) => JSON.stringify({ type: 'message', message: { role, content } });
+  await writeFile(join(directory, 'sessions', 'a.jsonl'), [
+    line('user', [{ type: 'text', text: 'http://localhost:8765' }]),
+    line('toolResult', [{ type: 'text', text: 'http://localhost:8177' }]),
+  ].join('\n'));
   await writeFile(join(directory, 'sessions', 'notes.txt'), 'ignored');
   assert.equal(await readPiSessions('/w', worktree => join(directory, 'sessions')), 'http://localhost:8765');
   assert.equal(await readPiSessions('/w', () => { throw new Error('none'); }), '');
@@ -117,4 +122,30 @@ test('the extension registers a closed-issues hook', () => {
   const hooks = [];
   previewServers({ on: (hook, handler) => hooks.push([hook, typeof handler]) });
   assert.deepEqual(hooks, [['closed-issues', 'function']]);
+});
+
+test('only what was said and the commands run count, not tool output', () => {
+  const line = (role, content) => JSON.stringify({ type: 'message', message: { role, content } });
+  assert.equal(conversationText(line('user', [{ type: 'text', text: 'see localhost:8080' }])), 'see localhost:8080');
+  assert.equal(conversationText(line('assistant', [
+    { type: 'thinking', thinking: 'localhost:1' },
+    { type: 'text', text: 'Preview: localhost:8080' },
+    { type: 'toolCall', name: 'bash', arguments: { command: 'curl localhost:8081' } },
+  ])), 'Preview: localhost:8080\n{"command":"curl localhost:8081"}');
+  assert.equal(conversationText(line('toolResult', [{ type: 'text', text: 'https://mac.example.ts.net:8177' }])), '');
+  assert.equal(conversationText('{"type":"custom"}'), '');
+  assert.equal(conversationText('not json'), '');
+});
+
+test('ports kept with `serves keep` are never stopped', async t => {
+  const h = harness({ servers: [server(18, 8140, `${ROOT}/site/done`), server(19, 8141, `${ROOT}/site/done`)] });
+  await releaseClosedIssueServers({ closed: [issue('done')], open: [] }, { ...h.options, keptPorts: async () => new Set([8140]) });
+  assert.deepEqual(h.stopped, [19]);
+
+  const config = await mkdtemp(join(tmpdir(), 'preview-servers-'));
+  t.after(() => rm(config, { recursive: true, force: true }));
+  await mkdir(join(config, 'serves'));
+  await writeFile(join(config, 'serves', 'keep'), '3000 next app\n8140 root tailnet URL\n\n');
+  assert.deepEqual([...await readKeptPorts({ XDG_CONFIG_HOME: config })], [3000, 8140]);
+  assert.deepEqual([...await readKeptPorts({ XDG_CONFIG_HOME: join(config, 'none') })], []);
 });

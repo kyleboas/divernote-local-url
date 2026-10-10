@@ -7,8 +7,10 @@ the issue started and removes their Tailscale serve URLs.
   agent scratch directory named after that worktree.
 - A server stays while an open issue mentions one of its URLs
   (`localhost:PORT`, `127.0.0.1:PORT`, its bind IP, or its Tailscale URL) in
-  its text, follow-up messages or Pi conversation. It is checked again every
+  its text, follow-up messages or Pi conversation (what was said and the
+  commands run, not command output). It is checked again every
   two minutes and stopped once no open issue mentions it.
+- Never stops a port kept with `serves keep PORT`.
 - Needs Divernote's `closed-issues` hook. Turn it off in /settings.
 - Log: `~/Library/Logs/divernote-local-url.log`.
 
