@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { readdir, readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join, sep } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -159,11 +160,48 @@ function ownedBy(cwd, worktree) {
   return cwd.split(sep).includes(scratchName);
 }
 
+/**
+ * Ports the user protected with `serves keep PORT [note]`, one per line in
+ * ~/.config/serves/keep (or $XDG_CONFIG_HOME/serves/keep).
+ */
+export async function readKeptPorts(env = process.env) {
+  const config = env.XDG_CONFIG_HOME || join(env.HOME || homedir(), '.config');
+  try {
+    const lines = (await readFile(join(config, 'serves', 'keep'), 'utf8')).split('\n');
+    return new Set(lines.map(line => Number(line.trim().split(/\s+/)[0])).filter(port => Number.isInteger(port) && port > 0));
+  } catch {
+    return new Set();
+  }
+}
+
 function issueText(issue) {
   return [issue.text, issue.description, ...(issue.messages ?? [])].filter(text => typeof text === 'string').join('\n');
 }
 
-/** Every Pi conversation file of the issue's worktree, newest part of each if huge. */
+/**
+ * What the user and the agent said in a Pi conversation line, and the
+ * commands the agent ran. Tool output is left out: an agent that lists every
+ * server (with `serves` or `tailscale serve status`) does not use them all.
+ */
+export function conversationText(line) {
+  let entry;
+  try {
+    entry = JSON.parse(line);
+  } catch {
+    return '';
+  }
+  const message = entry?.type === 'message' ? entry.message : undefined;
+  if (!message || !['user', 'assistant'].includes(message.role)) return '';
+  if (typeof message.content === 'string') return message.content;
+  if (!Array.isArray(message.content)) return '';
+  return message.content.map(block => {
+    if (block?.type === 'text' && typeof block.text === 'string') return block.text;
+    if (block?.type === 'toolCall' && message.role === 'assistant') return JSON.stringify(block.arguments ?? '');
+    return '';
+  }).filter(Boolean).join('\n');
+}
+
+/** What was said in every Pi conversation of the issue's worktree, newest part of each if huge. */
 export async function readPiSessions(worktree, piSessionDirectory) {
   let directory;
   try {
@@ -180,8 +218,9 @@ export async function readPiSessions(worktree, piSessionDirectory) {
   const texts = [];
   for (const name of names.filter(name => name.endsWith('.jsonl'))) {
     try {
-      const text = await readFile(join(directory, name), 'utf8');
-      texts.push(text.length > MAX_SESSION_BYTES ? text.slice(-MAX_SESSION_BYTES) : text);
+      let text = await readFile(join(directory, name), 'utf8');
+      if (text.length > MAX_SESSION_BYTES) text = text.slice(-MAX_SESSION_BYTES);
+      texts.push(text.split('\n').map(conversationText).filter(Boolean).join('\n'));
     } catch { /* a session file that cannot be read mentions nothing */ }
   }
   return texts.join('\n');
@@ -194,6 +233,7 @@ export async function readPiSessions(worktree, piSessionDirectory) {
  * conversation) stays and is reported as `shared`.
  */
 export async function releaseClosedIssueServers({ closed = [], open = [] }, {
+  keptPorts = readKeptPorts,
   listServers = listListeningServers,
   listServes = listTailscaleServes,
   readIssueSession = async () => '',
@@ -202,8 +242,10 @@ export async function releaseClosedIssueServers({ closed = [], open = [] }, {
   skip = () => false,
 } = {}) {
   if (closed.length === 0) return [];
+  const kept = await keptPorts();
   const owned = [];
   for (const server of await listServers()) {
+    if (server.ports.some(port => kept.has(port))) continue;
     const owner = server.cwd ? closed.find(issue => ownedBy(server.cwd, issue.worktree)) : undefined;
     if (owner && !skip(server.pid)) owned.push({ server, owner });
   }
